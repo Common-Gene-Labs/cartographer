@@ -1,4 +1,5 @@
 ##Cartographer
+
 **Copyright 2026 Common Gene Labs. All rights reserved.**
 
 This software and its source code are the property of Common Gene Labs.
@@ -8,6 +9,7 @@ is granted except by explicit written permission from Common Gene Labs.
 ---
 
 **Original concept and design by Dr. Amelia Miramonti, PhD.**
+
 Built by Common Gene Labs — https://elaiken3.github.io/common-gene-labs/
 
 ---
