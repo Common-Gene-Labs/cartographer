@@ -1024,12 +1024,16 @@ with st.sidebar:
                     import scipy.io
                     mat = scipy.io.loadmat(f)
                     mat_vars = {k: v for k, v in mat.items() if not k.startswith("_")}
-                    if len(mat_vars) == 1:
+                    if len(mat_vars) == 0:
+                        st.error(f"No usable variables found in {f.name}")
+                        continue
+                    elif len(mat_vars) == 1:
                         key = list(mat_vars.keys())[0]
                         df = pd.DataFrame(mat_vars[key])
                         fmt = "mat"
                     else:
                         # Multi-variable: load each numeric/array variable as its own table
+                        mat_loaded = 0
                         for key, val in mat_vars.items():
                             try:
                                 obj_df = pd.DataFrame(val)
@@ -1041,30 +1045,47 @@ with st.sidebar:
                             obj_df.attrs["source"] = "mat"
                             st.session_state.tables[oname] = obj_df
                             replaced += existed; added += not existed
+                            mat_loaded += 1
+                        if mat_loaded == 0:
+                            st.error(f"No variables in {f.name} could be converted to a table")
                         continue
                 elif ext in ("h5", "hdf5"):
                     import h5py
                     raw_bytes = f.read()
+                    # Collect datasets recursively (handles data stored inside groups)
+                    dataset_paths: list[str] = []
                     with h5py.File(io.BytesIO(raw_bytes), "r") as hf:
-                        dataset_keys = [k for k in hf.keys() if isinstance(hf[k], h5py.Dataset)]
-                    if len(dataset_keys) == 1:
+                        def _collect_datasets(name, obj):
+                            if isinstance(obj, h5py.Dataset):
+                                dataset_paths.append(name)
+                        hf.visititems(_collect_datasets)
+                    if len(dataset_paths) == 0:
+                        st.error(f"No datasets found in {f.name}")
+                        continue
+                    elif len(dataset_paths) == 1:
                         with h5py.File(io.BytesIO(raw_bytes), "r") as hf:
-                            df = pd.DataFrame(hf[dataset_keys[0]][()])
+                            df = pd.DataFrame(hf[dataset_paths[0]][()])
                         fmt = ext
                     else:
                         # Multi-dataset: load each as its own table
+                        hdf_loaded = 0
                         with h5py.File(io.BytesIO(raw_bytes), "r") as hf:
-                            for key in dataset_keys:
+                            for dpath in dataset_paths:
                                 try:
-                                    obj_df = pd.DataFrame(hf[key][()])
+                                    obj_df = pd.DataFrame(hf[dpath][()])
                                 except Exception:
                                     continue
                                 obj_df.columns = [re.sub(r"[^a-zA-Z0-9_]", "_", str(c)) for c in obj_df.columns]
-                                oname = f"{tname}_{key}"
+                                # Use the dataset path as the table name suffix (replace / with _)
+                                safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", dpath).strip("_") or f"ds{dataset_paths.index(dpath)}"
+                                oname = f"{tname}_{safe_key}"
                                 existed = oname in st.session_state.tables
                                 obj_df.attrs["source"] = ext
                                 st.session_state.tables[oname] = obj_df
                                 replaced += existed; added += not existed
+                                hdf_loaded += 1
+                        if hdf_loaded == 0:
+                            st.error(f"No datasets in {f.name} could be converted to a table")
                         continue
                 else:
                     st.error(f"Unsupported format: {f.name}")
