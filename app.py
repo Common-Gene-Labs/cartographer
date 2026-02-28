@@ -14,162 +14,50 @@ import hashlib
 from pathlib import Path
 from typing import Optional
 
-# ─── Database helpers ───────────────────────────────────────────────────────
+# ─── Module imports ──────────────────────────────────────────────────────────
+from db_connectors import get_connector, CONNECTORS, DatabaseConnector
+from inference import SchemaInferenceEngine, clean_name, table_digest
+from schema_parser import SchemaParser
 
-def _get_postgres_conn(host, port, database, user, password):
-    import psycopg2
-    return psycopg2.connect(host=host, port=int(port), dbname=database,
-                            user=user, password=password, connect_timeout=10)
+_inference_engine = SchemaInferenceEngine()
+_schema_parser    = SchemaParser()
 
-def _get_mysql_conn(host, port, database, user, password):
-    import pymysql
-    return pymysql.connect(host=host, port=int(port), db=database,
-                           user=user, password=password, connect_timeout=10,
-                           cursorclass=pymysql.cursors.DictCursor)
 
-def _get_sqlserver_conn(host, port, database, user, password, driver):
-    import pyodbc
-    conn_str = (f"DRIVER={{{driver}}};SERVER={host},{port};DATABASE={database};"
-                f"UID={user};PWD={password};TrustServerCertificate=yes;Encrypt=yes;")
-    return pyodbc.connect(conn_str, timeout=10)
+# ─── DB connection helpers ───────────────────────────────────────────────────
 
-def _get_snowflake_conn(account, user, password, warehouse, database, schema, role):
-    import snowflake.connector
-    kw = dict(account=account, user=user, password=password,
-              database=database, schema=schema)
-    if warehouse: kw["warehouse"] = warehouse
-    if role:      kw["role"] = role
-    return snowflake.connector.connect(**kw)
+def _db_connect(db_type: str, schema: str = "", **kwargs) -> None:
+    """
+    Instantiate the right connector, connect, introspect, and store in
+    session state. Shows st.success or st.error inline.
+    """
+    try:
+        connector = get_connector(db_type)
+        connector.connect(**kwargs)
+        tables, pk_set, fk_map = connector.introspect(schema=schema, **kwargs)
+        st.session_state.update(
+            db_conn  = connector,
+            db_type  = db_type,
+            db_meta  = (tables, pk_set, fk_map),
+            db_schema = schema,
+        )
+        st.success(f"Connected — {len(tables)} tables found")
+    except Exception as e:
+        st.error(f"Connection failed: {e}")
 
-def _get_bigquery_client(project, credentials_json):
-    from google.cloud import bigquery
-    from google.oauth2 import service_account
-    import json as _json
-    if credentials_json:
-        info = _json.loads(credentials_json)
-        creds = service_account.Credentials.from_service_account_info(
-            info, scopes=["https://www.googleapis.com/auth/bigquery"])
-        return bigquery.Client(project=project, credentials=creds)
-    return bigquery.Client(project=project)  # uses ADC
 
-def _get_redshift_conn(host, port, database, user, password):
-    import redshift_connector
-    return redshift_connector.connect(host=host, port=int(port), database=database,
-                                      user=user, password=password)
-
-# ── Introspection ──────────────────────────────────────────────────────────
-
-def _postgres_meta(conn, schema="public"):
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT table_name FROM information_schema.tables
-        WHERE table_schema = %s AND table_type = 'BASE TABLE' ORDER BY table_name
-    """, (schema,))
-    tables = [(schema, r[0]) for r in cur.fetchall()]
-    cur.execute("""
-        SELECT kcu.table_name, kcu.column_name
-        FROM information_schema.table_constraints tc
-        JOIN information_schema.key_column_usage kcu
-          ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-        WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = %s
-    """, (schema,))
-    pk_set = {(schema, r[0], r[1]) for r in cur.fetchall()}
-    cur.execute("""
-        SELECT kcu.table_name, kcu.column_name, ccu.table_name, ccu.column_name
-        FROM information_schema.table_constraints tc
-        JOIN information_schema.key_column_usage kcu
-          ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-        JOIN information_schema.constraint_column_usage ccu
-          ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
-        WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = %s
-    """, (schema,))
-    fk_map = {(schema, r[0], r[1]): (schema, r[2], r[3]) for r in cur.fetchall()}
-    return tables, pk_set, fk_map
-
-def _mysql_meta(conn, database):
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = %s AND table_type = 'BASE TABLE' ORDER BY table_name",
-            (database,))
-        tables = [(database, r["table_name"]) for r in cur.fetchall()]
-        cur.execute(
-            "SELECT table_name, column_name FROM information_schema.key_column_usage "
-            "WHERE constraint_name = 'PRIMARY' AND table_schema = %s", (database,))
-        pk_set = {(database, r["table_name"], r["column_name"]) for r in cur.fetchall()}
-        cur.execute(
-            "SELECT table_name, column_name, referenced_table_name, referenced_column_name "
-            "FROM information_schema.key_column_usage "
-            "WHERE table_schema = %s AND referenced_table_name IS NOT NULL", (database,))
-        fk_map = {(database, r["table_name"], r["column_name"]):
-                  (database, r["referenced_table_name"], r["referenced_column_name"])
-                  for r in cur.fetchall()}
-    return tables, pk_set, fk_map
-
-def _sqlserver_meta(conn, database):
-    cur = conn.cursor()
-    cur.execute(f"SELECT TABLE_SCHEMA, TABLE_NAME FROM [{database}].INFORMATION_SCHEMA.TABLES "
-                f"WHERE TABLE_TYPE='BASE TABLE' ORDER BY TABLE_SCHEMA, TABLE_NAME")
-    tables = [(r[0], r[1]) for r in cur.fetchall()]
-    cur.execute(f"""SELECT KU.TABLE_SCHEMA, KU.TABLE_NAME, KU.COLUMN_NAME
-        FROM [{database}].INFORMATION_SCHEMA.TABLE_CONSTRAINTS TC
-        JOIN [{database}].INFORMATION_SCHEMA.KEY_COLUMN_USAGE KU
-          ON TC.CONSTRAINT_NAME=KU.CONSTRAINT_NAME AND TC.TABLE_SCHEMA=KU.TABLE_SCHEMA
-        WHERE TC.CONSTRAINT_TYPE='PRIMARY KEY'""")
-    pk_set = {(r[0], r[1], r[2]) for r in cur.fetchall()}
-    cur.execute(f"""SELECT FK.TABLE_SCHEMA,FK.TABLE_NAME,FK.COLUMN_NAME,
-                         PK.TABLE_SCHEMA,PK.TABLE_NAME,PK.COLUMN_NAME
-        FROM [{database}].INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS RC
-        JOIN [{database}].INFORMATION_SCHEMA.KEY_COLUMN_USAGE FK ON RC.CONSTRAINT_NAME=FK.CONSTRAINT_NAME
-        JOIN [{database}].INFORMATION_SCHEMA.KEY_COLUMN_USAGE PK ON RC.UNIQUE_CONSTRAINT_NAME=PK.CONSTRAINT_NAME""")
-    fk_map = {(r[0],r[1],r[2]):(r[3],r[4],r[5]) for r in cur.fetchall()}
-    return tables, pk_set, fk_map
-
-def _snowflake_meta(conn, database, schema):
-    cur = conn.cursor()
-    cur.execute(f"SHOW TABLES IN SCHEMA {database}.{schema}")
-    tables = [(schema, r[1]) for r in cur.fetchall()]
-    cur.execute(f"SHOW PRIMARY KEYS IN SCHEMA {database}.{schema}")
-    pk_set = {(schema, r[3], r[4]) for r in cur.fetchall()}
-    cur.execute(f"SHOW IMPORTED KEYS IN SCHEMA {database}.{schema}")
-    fk_map = {(schema, r[7], r[8]): (schema, r[3], r[4]) for r in cur.fetchall()}
-    return tables, pk_set, fk_map
-
-def _bigquery_meta(client, project, dataset):
-    tables = [(dataset, t.table_id) for t in client.list_tables(f"{project}.{dataset}")]
-    pk_set, fk_map = set(), {}  # BigQuery has no declared PKs/FKs
-    return tables, pk_set, fk_map
-
-def _redshift_meta(conn, schema="public"):
-    # Redshift uses same information_schema as Postgres
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema = %s AND table_type = 'BASE TABLE' ORDER BY table_name",
-        (schema,))
-    tables = [(schema, r[0]) for r in cur.fetchall()]
-    cur.execute(
-        "SELECT tc.table_name, kcu.column_name "
-        "FROM information_schema.table_constraints tc "
-        "JOIN information_schema.key_column_usage kcu "
-        "ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema "
-        "WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = %s", (schema,))
-    pk_set = {(schema, r[0], r[1]) for r in cur.fetchall()}
-    fk_map = {}  # Redshift doesn't enforce FK constraints
-    return tables, pk_set, fk_map
-
-def load_db_table_sample(conn, db_type, schema, table, limit=10000):
-    if db_type == "sqlserver":
-        q = f"SELECT TOP {limit} * FROM [{schema}].[{table}]"
-    elif db_type == "bigquery":
-        # conn is a BQ client here; schema=dataset
-        q = f"SELECT * FROM `{schema}`.`{table}` LIMIT {limit}"
-        return conn.query(q).to_dataframe()
-    elif db_type in ("mysql",):
-        q = f"SELECT * FROM `{schema}`.`{table}` LIMIT {limit}"
-    else:  # postgres, snowflake, redshift
-        q = f'SELECT * FROM "{schema}"."{table}" LIMIT {limit}'
-    return pd.read_sql(q, conn)
+def _db_disconnect() -> None:
+    """Close the active connector and clear all DB session state."""
+    conn = st.session_state.get("db_conn")
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    st.session_state.db_conn         = None
+    st.session_state.db_type         = None
+    st.session_state.db_meta         = None
+    st.session_state.db_schema_rels  = []
+    st.rerun()
 
 
 # ─── Page config ────────────────────────────────────────────────────────────
@@ -623,540 +511,28 @@ div[data-testid="stDataFrame"] {{
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Helper functions
+# Inference helpers (wrappers around SchemaInferenceEngine)
 # ═══════════════════════════════════════════════════════════════════════════
-
-def clean_name(name: str) -> str:
-    """Normalize a column/table name: lowercase, non-alnum → underscore, collapse."""
-    n = re.sub(r"[^a-z0-9]", "_", name.lower())
-    n = re.sub(r"_+", "_", n).strip("_")
-    return n
-
-
-def id_stem(col_clean: str) -> str:
-    """'document_id' → 'document'"""
-    return re.sub(r"_id$", "", col_clean)
-
-
-def is_pk_name(col_clean: str, tname_clean: str) -> bool:
-    if col_clean == "id":
-        return True
-    if col_clean == f"{tname_clean}_id":
-        return True
-    if col_clean.endswith("_id") and tname_clean.startswith(id_stem(col_clean)):
-        return True
-    return False
-
-
-def is_fk_for(col_clean: str, t2_clean: str) -> bool:
-    if col_clean == f"{t2_clean}_id":
-        return True
-    if col_clean.endswith("_id") and t2_clean.startswith(id_stem(col_clean)):
-        return True
-    return False
-
 
 def detect_pks(df: pd.DataFrame, table_name: str, method: str = "both") -> list[str]:
-    """
-    Return at most ONE primary key column, chosen by priority:
-      1. Naming match (id / {table}_id)   — highest confidence
-      2. First all-unique, non-null column whose name ends in _id / _key
-      3. First all-unique, non-null column (any name)
-    Returning a single PK avoids confusing unique-but-not-PK columns
-    (e.g. email, name) being flagged as primary keys.
-    """
-    cols = df.columns.tolist()
-    n = len(df)
-
-    # Priority 1: naming convention match
-    if method in ("naming", "both"):
-        tname = clean_name(table_name)
-        for col in cols:
-            if is_pk_name(clean_name(col), tname):
-                return [col]
-
-    # Priority 2 & 3: uniqueness fallback (only when naming gave nothing)
-    if method in ("uniqueness", "both", "content", "all") and n > 0:
-        unique_cols = [
-            c for c in cols
-            if df[c].notna().all() and df[c].nunique() == n
-        ]
-        # Prefer columns whose name looks like an ID
-        id_like = [c for c in unique_cols
-                   if re.search(r"(_id|_key|_no|_num|_code)$", clean_name(c))]
-        if id_like:
-            return [id_like[0]]
-        if unique_cols:
-            return [unique_cols[0]]
-
-    return []
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Content-based inference helpers
-# ═══════════════════════════════════════════════════════════════════════════
-
-# Confidence thresholds
-OVERLAP_HIGH   = 0.98   # ≥98% of FK values found in PK column → high-confidence
-OVERLAP_MEDIUM = 0.80   # ≥80% → medium (partial match / sampled data)
-NAME_SIM_HIGH  = 0.85   # Jaro-Winkler ≥ 0.85 → strong name similarity
-NAME_SIM_MED   = 0.72   # Jaro-Winkler ≥ 0.72 → moderate name similarity
-DIST_SIM_HIGH  = 0.90   # Distribution cosine similarity ≥ 0.90
-DIST_SIM_MED   = 0.75
-
-# Value format fingerprint patterns
-FORMAT_PATTERNS = [
-    ("uuid",     re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)),
-    ("email",    re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")),
-    ("zip_us",   re.compile(r"^\d{5}(-\d{4})?$")),
-    ("phone",    re.compile(r"^\+?[\d\s\-().]{7,15}$")),
-    ("iso_date", re.compile(r"^\d{4}-\d{2}-\d{2}$")),
-    ("iso_ts",   re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}")),
-    ("hex_color",re.compile(r"^#[0-9a-f]{3,6}$", re.I)),
-    ("int_code", re.compile(r"^\d{1,6}$")),
-    ("alpha_code",re.compile(r"^[A-Z]{2,4}$")),
-]
-
-def _jaro_winkler(s1: str, s2: str) -> float:
-    """Pure-Python Jaro-Winkler similarity (no external dep)."""
-    if s1 == s2:
-        return 1.0
-    l1, l2 = len(s1), len(s2)
-    if l1 == 0 or l2 == 0:
-        return 0.0
-    match_dist = max(l1, l2) // 2 - 1
-    if match_dist < 0:
-        match_dist = 0
-    s1_matches = [False] * l1
-    s2_matches = [False] * l2
-    matches = 0
-    transpositions = 0
-    for i in range(l1):
-        lo = max(0, i - match_dist)
-        hi = min(i + match_dist + 1, l2)
-        for j in range(lo, hi):
-            if s2_matches[j] or s1[i] != s2[j]:
-                continue
-            s1_matches[i] = True
-            s2_matches[j] = True
-            matches += 1
-            break
-    if matches == 0:
-        return 0.0
-    k = 0
-    for i in range(l1):
-        if not s1_matches[i]:
-            continue
-        while not s2_matches[k]:
-            k += 1
-        if s1[i] != s2[k]:
-            transpositions += 1
-        k += 1
-    jaro = (matches/l1 + matches/l2 + (matches - transpositions/2)/matches) / 3
-    # Winkler prefix bonus
-    prefix = 0
-    for i in range(min(4, l1, l2)):
-        if s1[i] == s2[i]:
-            prefix += 1
-        else:
-            break
-    return jaro + prefix * 0.1 * (1 - jaro)
-
-
-def _col_dtype_class(series: pd.Series) -> str:
-    """Coarse type bucket: numeric | datetime | string."""
-    if pd.api.types.is_numeric_dtype(series):
-        return "numeric"
-    if pd.api.types.is_datetime64_any_dtype(series):
-        return "datetime"
-    return "string"
-
-
-def _format_fingerprint(series: pd.Series, sample: int = 200) -> str | None:
-    """
-    Sample up to `sample` non-null values and test what format ≥80% match.
-    Returns the format name or None.
-    """
-    vals = series.dropna().astype(str)
-    if len(vals) == 0:
-        return None
-    probe = vals.sample(min(sample, len(vals)), random_state=42)
-    for name, pat in FORMAT_PATTERNS:
-        hits = probe.str.match(pat).sum()
-        if hits / len(probe) >= 0.80:
-            return name
-    return None
-
-
-def _value_overlap(vals1: pd.Series, vals2: pd.Series) -> float:
-    """
-    Fraction of non-null values in vals1 that appear in vals2.
-    Fast set intersection; capped at 50k unique values each for performance.
-    """
-    s1 = set(vals1.dropna().astype(str).unique()[:50_000])
-    s2 = set(vals2.dropna().astype(str).unique()[:50_000])
-    if not s1:
-        return 0.0
-    return len(s1 & s2) / len(s1)
-
-
-def _distribution_similarity(vals1: pd.Series, vals2: pd.Series) -> float:
-    """
-    Cosine similarity between value-frequency histograms of two columns.
-    Works for both numeric and categorical data.
-    Scores near 1.0 mean the columns share similar value distributions.
-    """
-    import numpy as np
-    from scipy.sparse import csr_matrix
-
-    # Build unified vocabulary
-    s1 = vals1.dropna().astype(str).value_counts()
-    s2 = vals2.dropna().astype(str).value_counts()
-    if s1.empty or s2.empty:
-        return 0.0
-
-    vocab = list(set(s1.index) | set(s2.index))
-    v1 = np.array([s1.get(w, 0) for w in vocab], dtype=float)
-    v2 = np.array([s2.get(w, 0) for w in vocab], dtype=float)
-
-    norm1 = np.linalg.norm(v1)
-    norm2 = np.linalg.norm(v2)
-    if norm1 == 0 or norm2 == 0:
-        return 0.0
-    return float(np.dot(v1, v2) / (norm1 * norm2))
-
-
-def _null_pattern_correlation(df1: pd.DataFrame, col1: str,
-                               df2: pd.DataFrame, col2: str) -> float:
-    """
-    Pearson correlation between null masks of two columns that share the
-    same number of rows. Returns 0.0 if inapplicable.
-    """
-    if len(df1) != len(df2):
-        return 0.0
-    try:
-        from scipy.stats import pearsonr
-        mask1 = df1[col1].isna().astype(int)
-        mask2 = df2[col2].isna().astype(int)
-        if mask1.std() == 0 or mask2.std() == 0:
-            return 0.0
-        r, _ = pearsonr(mask1, mask2)
-        return float(r)
-    except Exception:
-        return 0.0
-
-
-def _score_candidate(
-    t1: str, col1: str, df1: pd.DataFrame,
-    t2: str, col2: str, df2: pd.DataFrame,
-    enable_flags: dict,
-) -> dict | None:
-    """
-    Run all enabled analyses on a (t1.col1 → t2.col2) candidate pair.
-    Returns a result dict with signals and composite confidence, or None
-    if no signal passes the minimum bar.
-    """
-    import numpy as np
-
-    signals = {}
-    reasons = []
-
-    # ── 1. Naming conventions ────────────────────────────────────────────
-    if enable_flags.get("naming"):
-        c1 = clean_name(col1)
-        t2c = clean_name(t2)
-        if is_fk_for(c1, t2c):
-            signals["naming_exact"] = 1.0
-            reasons.append("exact FK naming")
-        else:
-            # Fuzzy column name similarity (strip _id suffix before comparing)
-            stem1 = re.sub(r"_(id|key|code|num|no)$", "", c1)
-            stem2 = re.sub(r"_(id|key|code|num|no)$", "", clean_name(col2))
-            sim = _jaro_winkler(stem1, stem2)
-            if sim >= NAME_SIM_HIGH:
-                signals["name_sim"] = sim
-                reasons.append(f"name similarity {sim:.2f}")
-            elif sim >= NAME_SIM_MED:
-                signals["name_sim_weak"] = sim
-                reasons.append(f"weak name similarity {sim:.2f}")
-
-    # ── 2. Type compatibility guard ──────────────────────────────────────
-    dtype1 = _col_dtype_class(df1[col1])
-    dtype2 = _col_dtype_class(df2[col2])
-    if dtype1 != dtype2:
-        return None  # incompatible types → not a candidate
-
-    # ── 3. Value overlap (unconstrained — no _id name required) ─────────
-    if enable_flags.get("value_overlap") and len(df1) > 0 and len(df2) > 0:
-        overlap = _value_overlap(df1[col1], df2[col2])
-        if overlap >= OVERLAP_HIGH:
-            signals["overlap_high"] = overlap
-            reasons.append(f"value overlap {overlap:.0%}")
-        elif overlap >= OVERLAP_MEDIUM:
-            signals["overlap_medium"] = overlap
-            reasons.append(f"partial overlap {overlap:.0%}")
-
-    # ── 4. Exact cardinality match ───────────────────────────────────────
-    if enable_flags.get("cardinality") and len(df1) > 0 and len(df2) > 0:
-        u1 = set(df1[col1].dropna().astype(str))
-        u2 = set(df2[col2].dropna().astype(str))
-        if u1 and u2 and u1 == u2:
-            signals["cardinality_match"] = 1.0
-            reasons.append("identical value sets")
-
-    # ── 5. Format fingerprint ────────────────────────────────────────────
-    if enable_flags.get("format") and len(df1) > 0 and len(df2) > 0:
-        fmt1 = _format_fingerprint(df1[col1])
-        fmt2 = _format_fingerprint(df2[col2])
-        if fmt1 and fmt2 and fmt1 == fmt2:
-            signals["format_match"] = 0.6
-            reasons.append(f"shared format [{fmt1}]")
-
-    # ── 6. Distribution similarity ───────────────────────────────────────
-    if enable_flags.get("distribution") and len(df1) > 0 and len(df2) > 0:
-        dist_sim = _distribution_similarity(df1[col1], df2[col2])
-        if dist_sim >= DIST_SIM_HIGH:
-            signals["dist_high"] = dist_sim
-            reasons.append(f"distribution similarity {dist_sim:.2f}")
-        elif dist_sim >= DIST_SIM_MED:
-            signals["dist_med"] = dist_sim
-            reasons.append(f"weak distribution similarity {dist_sim:.2f}")
-
-    # ── 7. Null pattern correlation ──────────────────────────────────────
-    if enable_flags.get("null_pattern") and len(df1) == len(df2):
-        null_r = _null_pattern_correlation(df1, col1, df2, col2)
-        if null_r >= 0.80:
-            signals["null_corr"] = null_r
-            reasons.append(f"null pattern corr {null_r:.2f}")
-
-    if not signals:
-        return None
-
-    # ── Composite confidence score ───────────────────────────────────────
-    # Each signal class contributes a weighted vote; cap at 1.0
-    weight_map = {
-        "naming_exact":      1.00,
-        "cardinality_match": 0.95,
-        "overlap_high":      0.90,
-        "name_sim":          0.60,
-        "overlap_medium":    0.55,
-        "dist_high":         0.50,
-        "format_match":      0.40,
-        "dist_med":          0.30,
-        "name_sim_weak":     0.25,
-        "null_corr":         0.20,
-    }
-    # Use a "noisy OR" combination: 1 - Π(1 - wᵢ)
-    import math
-    score = 1.0 - math.prod(1.0 - weight_map.get(k, 0.1) for k in signals)
-    score = round(min(score, 1.0), 3)
-
-    # Determine primary detected_by label (highest-weight signal)
-    top_signal = max(signals, key=lambda k: weight_map.get(k, 0.1))
-    label_map = {
-        "naming_exact":      "naming",
-        "name_sim":          "name_similarity",
-        "name_sim_weak":     "name_similarity",
-        "overlap_high":      "value_overlap",
-        "overlap_medium":    "value_overlap",
-        "cardinality_match": "cardinality",
-        "format_match":      "format",
-        "dist_high":         "distribution",
-        "dist_med":          "distribution",
-        "null_corr":         "null_pattern",
-    }
-    detected_by = label_map.get(top_signal, "content")
-
-    # Confidence tier
-    if score >= 0.85:
-        confidence = "high"
-    elif score >= 0.55:
-        confidence = "medium"
-    else:
-        confidence = "low"
-
-    return {
-        "signals":     signals,
-        "reasons":     reasons,
-        "score":       score,
-        "confidence":  confidence,
-        "detected_by": detected_by,
-    }
+    return _inference_engine.detect_pks(df, table_name, method)
 
 
 def detect_fks(
-    tables: dict[str, pd.DataFrame],
+    tables: dict,
     method: str = "both",
     min_confidence: str = "medium",
     enable_flags: dict | None = None,
 ) -> list[dict]:
-    """
-    Multi-signal FK detection.
-    method controls which signal families are active:
-      "naming"     → naming signals only
-      "content"    → all content-based signals (no naming)
-      "both"/"all" → everything
-      "manual"     → skip auto-detection entirely
-    min_confidence: "low" | "medium" | "high" — minimum tier to emit
-    enable_flags: fine-grained per-signal overrides
-    """
-    if method == "manual" or len(tables) < 2:
-        return []
-
-    conf_rank = {"low": 0, "medium": 1, "high": 2}
-    min_rank = conf_rank.get(min_confidence, 1)
-
-    # Build enable_flags from method
-    if enable_flags is None:
-        use_naming  = method in ("naming", "both", "all")
-        use_content = method in ("content", "both", "all", "uniqueness")
-        enable_flags = {
-            "naming":       use_naming,
-            "value_overlap": use_content,
-            "cardinality":  use_content,
-            "format":       use_content,
-            "distribution": use_content,
-            "null_pattern": use_content,
-        }
-
-    tnames = list(tables.keys())
-
-    # Pre-compute PK columns per table (all-unique + no-nulls)
-    pk_map = {}
-    for t in tnames:
-        df = tables[t]
-        n = len(df)
-        pk_map[t] = [c for c in df.columns
-                     if n > 0 and df[c].notna().all() and df[c].nunique() == n]
-
-    results: list[dict] = []
-    seen: set[str] = set()     # "t1|col1|t2" — one rel per (table, col, target)
-    best: dict[str, float] = {}  # "t1|col1" → best score so far (pick best target)
-
-    for t1 in tnames:
-        df1 = tables[t1]
-        if len(df1) == 0 and not enable_flags.get("naming"):
-            continue
-
-        for col1 in df1.columns:
-            if col1 in pk_map[t1]:
-                continue  # skip PKs of own table
-
-            too_large = len(df1) > 150_000 or len(df1.columns) > 300
-
-            for t2 in tnames:
-                if t2 == t1:
-                    continue
-
-                rel_key = f"{t1}|{col1}|{t2}"
-                if rel_key in seen:
-                    continue
-
-                df2 = tables[t2]
-
-                # For content signals we compare col1 against every candidate
-                # PK column in t2 (and also all-unique cols); pick best match
-                target_cols = pk_map[t2] if pk_map[t2] else list(df2.columns)
-                # Limit scan for large tables
-                if too_large:
-                    target_cols = [c for c in target_cols
-                                   if bool(re.search(r"(_id|_key|id$|key$)",
-                                                     clean_name(c)))]
-
-                best_result = None
-                best_to_col = None
-
-                for col2 in target_cols:
-                    result = _score_candidate(
-                        t1, col1, df1,
-                        t2, col2, df2,
-                        enable_flags,
-                    )
-                    if result is None:
-                        continue
-                    if best_result is None or result["score"] > best_result["score"]:
-                        best_result = result
-                        best_to_col = col2
-
-                if best_result is None:
-                    continue
-                if conf_rank.get(best_result["confidence"], 0) < min_rank:
-                    continue
-
-                # Deduplicate: if col1 already has a higher-scoring rel, skip
-                col_key = f"{t1}|{col1}"
-                if col_key in best and best[col_key] > best_result["score"] + 0.05:
-                    continue
-                best[col_key] = best_result["score"]
-
-                seen.add(rel_key)
-                results.append(dict(
-                    from_table  = t1,
-                    from_col    = col1,
-                    to_table    = t2,
-                    to_col      = best_to_col,
-                    detected_by = best_result["detected_by"],
-                    confidence  = best_result["confidence"],
-                    score       = best_result["score"],
-                    reasons     = best_result["reasons"],
-                    signals     = best_result["signals"],
-                ))
-
-    # Sort by confidence desc, score desc
-    results.sort(key=lambda r: (-conf_rank.get(r["confidence"], 0), -r["score"]))
-    return results
+    return _inference_engine.detect_fks(tables, method, min_confidence, enable_flags)
 
 
-def parse_schema_json(raw: str) -> tuple[dict[str, pd.DataFrame], list[dict]]:
-    """
-    Parse a JSON schema definition. Expected format:
-    {
-      "tables": [
-        {
-          "name": "orders",
-          "columns": [
-            {"name": "order_id", "type": "integer", "primary_key": true},
-            {"name": "customer_id", "type": "integer", "foreign_key": {"table": "customers", "column": "customer_id"}}
-          ]
-        }
-      ]
-    }
-    Returns (tables_as_empty_dfs, explicit_rels)
-    """
-    data = json.loads(raw)
-    tables = {}
-    rels = []
-
-    for tbl in data.get("tables", []):
-        tname = tbl["name"]
-        cols = [c["name"] for c in tbl.get("columns", [])]
-        tables[tname] = pd.DataFrame(columns=cols)
-        tables[tname].attrs["source"] = "schema"
-        tables[tname].attrs["columns_meta"] = tbl.get("columns", [])
-
-        for col in tbl.get("columns", []):
-            fk = col.get("foreign_key")
-            if fk:
-                rels.append(dict(
-                    from_table=tname,
-                    from_col=col["name"],
-                    to_table=fk["table"],
-                    to_col=fk.get("column"),
-                    detected_by="schema",
-                ))
-
-    return tables, rels
+def parse_schema_json(raw: str):
+    return _schema_parser.parse_json(raw)
 
 
-def parse_schema_yaml(raw: str) -> tuple[dict[str, pd.DataFrame], list[dict]]:
-    """Same as JSON but YAML input."""
-    data = yaml.safe_load(raw)
-    return parse_schema_json(json.dumps(data))
-
-
-def table_digest(tables: dict, method: str) -> str:
-    parts = "|".join(f"{k}:{len(v)}:{len(v.columns)}" for k, v in tables.items())
-    return hashlib.md5(f"{parts}//{method}".encode()).hexdigest()
+def parse_schema_yaml(raw: str):
+    return _schema_parser.parse_yaml(raw)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1807,14 +1183,8 @@ with st.sidebar:
             pg_user = st.text_input("Username")
             pg_pwd  = st.text_input("Password", type="password")
             if st.form_submit_button("Connect", width="stretch"):
-                try:
-                    conn = _get_postgres_conn(pg_host, pg_port, pg_db, pg_user, pg_pwd)
-                    tbl, pk, fk = _postgres_meta(conn, pg_sch)
-                    st.session_state.update(db_conn=conn, db_type="postgres",
-                        db_meta=(tbl, pk, fk), db_schema=pg_sch)
-                    st.success(f"Connected — {len(tbl)} tables")
-                except Exception as e:
-                    st.error(f"Failed: {e}")
+                _db_connect("postgres", host=pg_host, port=pg_port, database=pg_db,
+                            user=pg_user, password=pg_pwd, schema=pg_sch)
 
     elif db_choice == "mysql":
         with st.form("mysql_form"):
@@ -1824,14 +1194,8 @@ with st.sidebar:
             my_user = st.text_input("Username")
             my_pwd  = st.text_input("Password", type="password")
             if st.form_submit_button("Connect", width="stretch"):
-                try:
-                    conn = _get_mysql_conn(my_host, my_port, my_db, my_user, my_pwd)
-                    tbl, pk, fk = _mysql_meta(conn, my_db)
-                    st.session_state.update(db_conn=conn, db_type="mysql",
-                        db_meta=(tbl, pk, fk), db_schema=my_db)
-                    st.success(f"Connected — {len(tbl)} tables")
-                except Exception as e:
-                    st.error(f"Failed: {e}")
+                _db_connect("mysql", host=my_host, port=my_port, database=my_db,
+                            user=my_user, password=my_pwd, schema=my_db)
 
     elif db_choice == "sqlserver":
         with st.form("ss_form"):
@@ -1846,14 +1210,8 @@ with st.sidebar:
                 "ODBC Driver 13 for SQL Server",
             ])
             if st.form_submit_button("Connect", width="stretch"):
-                try:
-                    conn = _get_sqlserver_conn(ss_host, ss_port, ss_db, ss_user, ss_pwd, ss_drv)
-                    tbl, pk, fk = _sqlserver_meta(conn, ss_db)
-                    st.session_state.update(db_conn=conn, db_type="sqlserver",
-                        db_meta=(tbl, pk, fk), db_schema=ss_db)
-                    st.success(f"Connected — {len(tbl)} tables")
-                except Exception as e:
-                    st.error(f"Failed: {e}")
+                _db_connect("sqlserver", host=ss_host, port=ss_port, database=ss_db,
+                            user=ss_user, password=ss_pwd, driver=ss_drv, schema=ss_db)
 
     elif db_choice == "snowflake":
         with st.form("sf_form"):
@@ -1865,14 +1223,8 @@ with st.sidebar:
             sf_wh   = st.text_input("Warehouse (optional)")
             sf_role = st.text_input("Role (optional)")
             if st.form_submit_button("Connect", width="stretch"):
-                try:
-                    conn = _get_snowflake_conn(sf_acct, sf_user, sf_pwd, sf_wh, sf_db, sf_sch, sf_role)
-                    tbl, pk, fk = _snowflake_meta(conn, sf_db, sf_sch)
-                    st.session_state.update(db_conn=conn, db_type="snowflake",
-                        db_meta=(tbl, pk, fk), db_schema=sf_sch)
-                    st.success(f"Connected — {len(tbl)} tables")
-                except Exception as e:
-                    st.error(f"Failed: {e}")
+                _db_connect("snowflake", account=sf_acct, user=sf_user, password=sf_pwd,
+                            database=sf_db, schema=sf_sch, warehouse=sf_wh, role=sf_role)
 
     elif db_choice == "bigquery":
         with st.form("bq_form"):
@@ -1881,14 +1233,8 @@ with st.sidebar:
             bq_creds   = st.text_area("Service account JSON (leave blank for ADC)",
                                       height=80, placeholder='{"type":"service_account",...}')
             if st.form_submit_button("Connect", width="stretch"):
-                try:
-                    client = _get_bigquery_client(bq_project, bq_creds.strip() or None)
-                    tbl, pk, fk = _bigquery_meta(client, bq_project, bq_dataset)
-                    st.session_state.update(db_conn=client, db_type="bigquery",
-                        db_meta=(tbl, pk, fk), db_schema=bq_dataset)
-                    st.success(f"Connected — {len(tbl)} tables")
-                except Exception as e:
-                    st.error(f"Failed: {e}")
+                _db_connect("bigquery", project=bq_project, dataset=bq_dataset,
+                            credentials_json=bq_creds.strip() or None, schema=bq_dataset)
 
     elif db_choice == "redshift":
         with st.form("rs_form"):
@@ -1899,14 +1245,8 @@ with st.sidebar:
             rs_user = st.text_input("Username")
             rs_pwd  = st.text_input("Password", type="password")
             if st.form_submit_button("Connect", width="stretch"):
-                try:
-                    conn = _get_redshift_conn(rs_host, rs_port, rs_db, rs_user, rs_pwd)
-                    tbl, pk, fk = _redshift_meta(conn, rs_sch)
-                    st.session_state.update(db_conn=conn, db_type="redshift",
-                        db_meta=(tbl, pk, fk), db_schema=rs_sch)
-                    st.success(f"Connected — {len(tbl)} tables")
-                except Exception as e:
-                    st.error(f"Failed: {e}")
+                _db_connect("redshift", host=rs_host, port=rs_port, database=rs_db,
+                            user=rs_user, password=rs_pwd, schema=rs_sch)
 
     # ── Table picker shown after any successful connection ─────────────────
     if st.session_state.db_conn is not None and st.session_state.db_meta is not None:
@@ -1921,12 +1261,11 @@ with st.sidebar:
             if st.button("Load selected", key="db_load", width="stretch") and selected_db:
                 prog = st.progress(0, text="Loading…")
                 loaded, errors = 0, []
+                connector: DatabaseConnector = st.session_state.db_conn
                 for i, label in enumerate(selected_db):
                     sch, tbl = label.split(".", 1)
                     try:
-                        df = load_db_table_sample(
-                            st.session_state.db_conn, st.session_state.db_type, sch, tbl)
-                        df.columns = [re.sub(r"[^a-zA-Z0-9_]", "_", str(c)) for c in df.columns]
+                        df = connector.load_table(sch, tbl)
                         df.attrs["source"] = st.session_state.db_type
                         st.session_state.tables[tbl] = df
                         loaded += 1
@@ -1951,13 +1290,7 @@ with st.sidebar:
                 (st.success if loaded else st.error)(", ".join(parts))
         with col_disc:
             if st.button("Disconnect", key="db_disconnect", width="stretch"):
-                try: st.session_state.db_conn.close()
-                except: pass
-                st.session_state.db_conn = None
-                st.session_state.db_type = None
-                st.session_state.db_meta = None
-                st.session_state.db_schema_rels = []
-                st.rerun()
+                _db_disconnect()
 
     # ── 04 Detection Method ──────────────────────────────────────────────
     st.markdown('<div class="sidebar-section">04 // Detection Method</div>', unsafe_allow_html=True)
