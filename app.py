@@ -383,13 +383,22 @@ section[data-testid="stSidebar"] > div:first-child {{
 [data-testid="stFileUploaderDropzone"] span,
 [data-testid="stFileUploaderDropzone"] p,
 [data-testid="stFileUploaderDropzone"] small {{
-  font-family: var(--sans) !important;
+  font-family: var(--mono) !important;
+  font-size: 11px !important;
   color: var(--text2) !important;
+  letter-spacing: 0.3px !important;
 }}
 [data-testid="stFileUploaderDropzone"] {{
   background: var(--surface) !important;
   border: 2px dashed var(--border2) !important;
   border-radius: 8px !important;
+}}
+[data-testid="stFileUploaderDropzone"] small {{
+  white-space: normal !important;
+  word-break: break-word !important;
+  display: block !important;
+  text-align: center !important;
+  line-height: 1.5 !important;
 }}
 [data-testid="stFileUploaderDropzone"] button,
 [data-testid="stFileUploaderDropzone"] [kind="secondary"] {{
@@ -912,7 +921,7 @@ with st.sidebar:
 
     # ── 01 Upload CSVs ───────────────────────────────────────────────────
     st.markdown('<div class="sidebar-section">01 // Upload Tables</div>', unsafe_allow_html=True)
-    csv_files = st.file_uploader("Upload table files", type=["csv", "tsv", "xlsx", "xls", "xlsm", "ods", "parquet", "json", "ndjson", "sav", "por", "sas7bdat", "xpt", "rds", "rdata", "rda", "dta", "mat", "h5", "hdf5"], accept_multiple_files=True, key="csv_upload", label_visibility="collapsed")
+    csv_files = st.file_uploader("Drop a file to begin mapping", type=["csv", "tsv", "xlsx", "xls", "xlsm", "ods", "parquet", "json", "ndjson", "sav", "por", "sas7bdat", "xpt", "rds", "rdata", "rda", "dta", "mat", "h5", "hdf5"], accept_multiple_files=True, key="csv_upload", label_visibility="collapsed")
 
     if csv_files:
         added, replaced = 0, 0
@@ -1110,7 +1119,7 @@ with st.sidebar:
     st.markdown('<div class="sidebar-section">02 // Schema Definition (JSON/YAML)</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-hint">Define exact relationships without data. Overrides auto-detection for named tables.</div>', unsafe_allow_html=True)
 
-    schema_file = st.file_uploader("Upload schema file", type=["json", "yaml", "yml"], key="schema_upload", label_visibility="collapsed")
+    schema_file = st.file_uploader("Drop a schema file to define relationships", type=["json", "yaml", "yml"], key="schema_upload", label_visibility="collapsed")
     if schema_file:
         raw = schema_file.read().decode("utf-8")
         try:
@@ -1401,7 +1410,7 @@ if not tables:
       <div class="icon">◫</div>
       <h3>No tables loaded</h3>
       <p style="color:#5a7898;font-size:13px;font-family:'JetBrains Mono',monospace;">
-        Upload CSV files or a JSON/YAML schema using the sidebar to begin.
+        Load data from a file or database — or define your schema directly.
       </p>
     </div>
     """, unsafe_allow_html=True)
