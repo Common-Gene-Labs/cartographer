@@ -1,6 +1,3 @@
-Readme · MD
-Copy
-
 # ◫ Cartographer
 
 **Map primary keys, foreign keys, and table relationships across any data source.**
