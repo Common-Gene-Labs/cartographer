@@ -1,8 +1,11 @@
+Readme · MD
+Copy
+
 # ◫ Cartographer
 
 **Map primary keys, foreign keys, and table relationships across any data source.**
 
-Cartographer is an internal data tool built by Common Gene Labs. It takes tabular data — from files or live database connections — and surfaces the hidden structure within it: which columns are primary keys, which are foreign keys, and how tables relate to each other. It produces an interactive entity-relationship diagram alongside column-level metadata and an exportable relationships report.
+Cartographer is an internal data tool built by Common Gene Labs. It takes tabular data — from files or live database connections — and surfaces the hidden structure within it: which columns are primary keys, which are foreign keys, and how tables relate to each other. It produces an interactive entity-relationship diagram alongside column-level metadata, an exportable relationships report, and ready-to-use dbt and Mermaid output.
 
 Originally conceived and designed by **Dr. Amelia Miramonti, PhD**.
 
@@ -10,7 +13,7 @@ Originally conceived and designed by **Dr. Amelia Miramonti, PhD**.
 
 ## What it does
 
-Upload CSV, Excel, Parquet, or JSON files, or connect directly to a database. Cartographer runs a multi-signal inference engine across your tables — examining column names, value overlap, cardinality, format patterns, and statistical distributions — to identify likely relationships. Results are shown as an interactive ERD you can drag, zoom, and explore.
+Upload CSV, Excel, Parquet, JSON, or a range of other tabular formats, or connect directly to a database. Cartographer runs a multi-signal inference engine across your tables — examining column names, value overlap, cardinality, format patterns, and statistical distributions — to identify likely relationships. Results are shown as an interactive ERD you can drag, zoom, focus, search, and export.
 
 When a database connection is used, declared foreign key constraints are imported directly, giving you an accurate diagram without inference.
 
@@ -29,6 +32,14 @@ When a database connection is used, declared foreign key constraints are importe
 | Parquet | `.parquet` |
 | JSON array | `.json` |
 | Newline-delimited JSON | `.ndjson` |
+| SPSS | `.sav`, `.por` |
+| SAS | `.sas7bdat`, `.xpt` |
+| R data | `.rds`, `.rdata`, `.rda` |
+| Stata | `.dta` |
+| MATLAB | `.mat` |
+| HDF5 | `.h5`, `.hdf5` |
+
+Multi-sheet Excel files, multi-object R files, and multi-dataset HDF5 files are loaded as separate tables automatically.
 
 **Database connections**
 
@@ -57,9 +68,90 @@ Cartographer runs up to 7 signals in parallel on each candidate column pair and 
 | **Distribution similarity** | KS-test on numeric distributions |
 | **Null-pattern correlation** | Pearson correlation of null positions |
 
-Each relationship gets a **low / medium / high** confidence label. A minimum confidence threshold can be set in the sidebar to filter noise.
+Each relationship gets a **low / medium / high** confidence label. A minimum confidence threshold can be set in the sidebar to filter noise. Individual relationships can be promoted, demoted, or suppressed directly from the Relationships tab — edits persist across reruns and are included in session saves.
 
 Schema-defined relationships and database FK constraints always take priority over inferred ones.
+
+> **Large tables:** tables over 100,000 rows are automatically sampled to 10,000 rows for analysis. The original row count is preserved and displayed wherever the table appears.
+
+---
+
+## ERD diagram
+
+The ERD tab renders an interactive vis.js network with the following capabilities:
+
+**Layout modes**
+
+| Mode | Behaviour |
+|---|---|
+| Force | Physics-based spring layout (default) |
+| Hierarchical | Top-down directed tree, physics disabled |
+| Circular | Nodes arranged in a ring post-stabilization |
+| Compact | Tighter spring constants for dense schemas |
+
+**Interaction**
+
+- **Drag** nodes to reposition them — positions are pinned and restored on every subsequent render, including after page refresh
+- **Double-click** a node to unpin it and let physics take over
+- **Scroll** to zoom
+- **Hover** a node for a full column list with PK/FK annotations, row count, and source
+- **Hover** an edge for the full relationship path, detection method, confidence score, and contributing signals
+- **Search** — type in the search box above the diagram to highlight matching tables and zoom to them
+- **Focus mode** — click the Focus button, then click any table to isolate its immediate neighbourhood; all other nodes and edges are dimmed
+
+**Toolbar buttons**
+
+| Button | Action |
+|---|---|
+| Focus | Toggle focus-on-click mode |
+| Map | Toggle minimap overlay (bottom-right corner) |
+| PNG ↓ | Export the current canvas as `cartographer_erd.png` |
+
+**Visual encoding**
+
+- Node borders glow **yellow** for tables matching the current search query
+- **Solid edges** indicate naming/schema/cardinality signals; **dashed edges** indicate statistical signals (value overlap, distribution, null pattern, format)
+- Edge **thickness** and **opacity** both encode confidence: high → thick/opaque, low → thin/faint
+- Source-group **background ellipses** appear when tables come from more than one source, labelled with the source name
+
+---
+
+## Table Details tab
+
+Each table is shown as a card with pills indicating row count, column count, source format, detected PKs, and inferred FK references.
+
+Below each card:
+- A **column summary** dataframe lists every column with its type, non-null count, unique count, and PK/FK flags
+- A **Show preview** checkbox reveals the first 5 rows of the actual data
+- A **⚠ Possible unlinked columns** banner appears when a column name is shared with another table but no relationship has been detected, flagging it as a potential missed FK
+
+Tables that were auto-sampled show a `⚠ SAMPLED N of M rows` banner above the column summary.
+
+---
+
+## Relationships tab
+
+Relationships are grouped by detection method. Each row shows:
+
+- Source and target table + column
+- Detection method badge (colour-coded by signal type)
+- Confidence dot and score for auto-detected relationships
+- Signal chips listing each contributing signal
+
+**Inline confidence editing** — each auto-detected relationship has ▲ Promote / ▼ Demote / ✕ Suppress controls. Suppressed relationships are hidden from the ERD and all exports. A **Clear overrides** button resets all edits.
+
+---
+
+## Export tab
+
+| Export | Format | Contents |
+|---|---|---|
+| Relationships CSV | `.csv` | All relationships with confidence, score, signals, and reasons |
+| dbt schema.yml | `.yml` | dbt models with `unique`, `not_null`, and `relationships` tests |
+| Mermaid ERD | `.mmd` | `erDiagram` block ready to paste into GitHub, Notion, or Confluence |
+| Save session | `.json` | Full workspace snapshot: tables, relationships, node positions, confidence overrides |
+
+A **Restore session** uploader lets you reload a previously saved workspace, including all node positions and manual edits.
 
 ---
 
@@ -67,7 +159,7 @@ Schema-defined relationships and database FK constraints always take priority ov
 
 ```bash
 # 1. Clone and enter the directory
-git clone <repo-url>
+git clone 
 cd cartographer
 
 # 2. Create a virtual environment
@@ -106,6 +198,10 @@ google-cloud-bigquery>=3.0.0
 google-cloud-bigquery-storage>=2.0.0
 db-dtypes>=1.0.0
 redshift-connector>=2.0.0
+pyreadstat>=1.2.0
+pyreadr>=0.4.0
+scipy>=1.10.0
+h5py>=3.0.0
 ```
 
 SQL Server also requires the [Microsoft ODBC Driver](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server) installed on the host machine.
@@ -150,7 +246,7 @@ streamlit run app.py --server.port=$PORT --server.address=0.0.0.0
 
 ## Schema file format
 
-Relationships can also be declared explicitly via a JSON or YAML schema file, without needing row data. Schema-defined relationships take priority over all inference.
+Relationships can be declared explicitly via a JSON or YAML schema file, without needing row data. Schema-defined relationships take priority over all inference.
 
 ```json
 {
@@ -183,6 +279,9 @@ An `example_schema.json` is included — a 5-table e-commerce model ready to loa
 ```
 .
 ├── app.py                  # Main Streamlit application
+├── inference.py            # Multi-signal FK inference engine
+├── schema_parser.py        # JSON/YAML schema parser
+├── db_connectors.py        # Database connector classes
 ├── requirements.txt        # Python dependencies
 ├── example_schema.json     # Sample schema for testing
 └── README.md
