@@ -200,7 +200,7 @@ Opens at `http://localhost:8501`.
 
 ### Running in VS Code
 
-The steps are identical to Positron. Use the integrated terminal (`` Ctrl+` ``) and the Python interpreter picker in the status bar to select your `venv`.
+The steps are identical to Positron. Use the integrated terminal (<kbd>Ctrl</kbd>+<kbd>`</kbd>) and the Python interpreter picker in the status bar to select your `venv`.
 
 ---
 
