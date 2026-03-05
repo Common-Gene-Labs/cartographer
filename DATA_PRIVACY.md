@@ -6,7 +6,7 @@ This document describes exactly where uploaded files and database data go when y
 
 ## Summary
 
-**Cartographer processes all data locally, in memory, on the machine running the app.** No data is transmitted to any external server, API, or cloud service. Nothing is written to disk beyond a short-lived temporary file that is deleted immediately after reading (see below). When the browser tab is closed or the Streamlit session ends, all data is gone.
+**For uploaded files, Cartographer processes data locally, in memory, on the machine running the app.** Cartographer does not send your data to any third‑party analytics, LLM, or cloud APIs. Aside from normal network communication between your browser and the Cartographer server (and, if you configure them, between Cartographer and your own database endpoints), no additional external services are contacted. Nothing is written to disk beyond a short-lived temporary file that is deleted immediately after reading (see below). When the browser tab is closed or the Streamlit session ends, all in-memory data is gone.
 
 ---
 
