@@ -158,16 +158,52 @@ Running locally is the most privacy-preserving option — your data never leaves
 
 **Prerequisites:** Python 3.10 or later. SQL Server additionally requires the [Microsoft ODBC Driver 17 or 18](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server).
 
+**macOS / Linux**
+
 ```bash
 # 1. Clone and enter the directory
 git clone <repo-url>
 cd cartographer
 
-# 2. Create a virtual environment
+# 2. Create and activate a virtual environment
 python -m venv venv
-source venv/bin/activate        # macOS / Linux
-venv\Scripts\activate           # Windows (cmd)
-# venv\Scripts\Activate.ps1    # Windows (PowerShell)
+source venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Run
+streamlit run app.py
+```
+
+**Windows (cmd)**
+
+```cmd
+:: 1. Clone and enter the directory
+git clone <repo-url>
+cd cartographer
+
+:: 2. Create and activate a virtual environment
+python -m venv venv
+venv\Scripts\activate
+
+:: 3. Install dependencies
+pip install -r requirements.txt
+
+:: 4. Run
+streamlit run app.py
+```
+
+**Windows (PowerShell)**
+
+```powershell
+# 1. Clone and enter the directory
+git clone <repo-url>
+cd cartographer
+
+# 2. Create and activate a virtual environment
+python -m venv venv
+venv\Scripts\Activate.ps1
 
 # 3. Install dependencies
 pip install -r requirements.txt

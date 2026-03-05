@@ -104,6 +104,8 @@ Running locally is the most privacy-preserving option. Your data never leaves yo
 
 ### Terminal / command line
 
+**macOS / Linux**
+
 ```bash
 # 1. Clone the repository
 git clone <repo-url>
@@ -111,9 +113,43 @@ cd cartographer
 
 # 2. Create and activate a virtual environment
 python -m venv venv
-source venv/bin/activate          # macOS / Linux
-venv\Scripts\activate             # Windows (cmd)
-# or: venv\Scripts\Activate.ps1  # Windows (PowerShell)
+source venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Launch the app
+streamlit run app.py
+```
+
+**Windows (cmd)**
+
+```cmd
+:: 1. Clone the repository
+git clone <repo-url>
+cd cartographer
+
+:: 2. Create and activate a virtual environment
+python -m venv venv
+venv\Scripts\activate
+
+:: 3. Install dependencies
+pip install -r requirements.txt
+
+:: 4. Launch the app
+streamlit run app.py
+```
+
+**Windows (PowerShell)**
+
+```powershell
+# 1. Clone the repository
+git clone <repo-url>
+cd cartographer
+
+# 2. Create and activate a virtual environment
+python -m venv venv
+venv\Scripts\Activate.ps1
 
 # 3. Install dependencies
 pip install -r requirements.txt
