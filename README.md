@@ -154,14 +154,20 @@ A **Restore session** uploader lets you reload a previously saved workspace, inc
 
 ## Running locally
 
+Running locally is the most privacy-preserving option — your data never leaves your machine. See [DATA_PRIVACY.md](DATA_PRIVACY.md) for a full audit of exactly where uploaded files and database data are stored and processed.
+
+**Prerequisites:** Python 3.10 or later. SQL Server additionally requires the [Microsoft ODBC Driver 17 or 18](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server).
+
 ```bash
 # 1. Clone and enter the directory
-git clone 
+git clone <repo-url>
 cd cartographer
 
 # 2. Create a virtual environment
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+source venv/bin/activate        # macOS / Linux
+venv\Scripts\activate           # Windows (cmd)
+# venv\Scripts\Activate.ps1    # Windows (PowerShell)
 
 # 3. Install dependencies
 pip install -r requirements.txt
@@ -171,6 +177,30 @@ streamlit run app.py
 ```
 
 Opens at `http://localhost:8501`.
+
+### Running in Positron
+
+[Positron](https://github.com/posit-dev/positron) is a data science IDE from Posit. The workflow is the same as any terminal-based Python project:
+
+1. Open the `cartographer` folder (File > Open Folder).
+2. Open the Positron terminal (View > Terminal) and create the virtual environment:
+   ```bash
+   python -m venv venv
+   ```
+3. Select the interpreter — use the picker in the status bar and choose `venv/bin/python` (macOS/Linux) or `venv\Scripts\python.exe` (Windows).
+4. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+5. Launch the app:
+   ```bash
+   streamlit run app.py
+   ```
+6. Open `http://localhost:8501` in your browser. Press `Ctrl+C` to stop.
+
+### Running in VS Code
+
+The steps are identical to Positron. Use the integrated terminal (<kbd>Ctrl</kbd>+<kbd>`</kbd>) and the Python interpreter picker in the status bar to select your `venv`.
 
 ---
 
